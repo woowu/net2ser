@@ -193,7 +193,7 @@ const argv = require('yargs/yargs')(process.argv.slice(2))
         describe: 'Serial device baudrate',
         nargs: 1,
         type: 'number',
-        default: 9600,
+        default: 115200,
     })
     .option('port', {
         alias: 'p',
