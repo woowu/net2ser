@@ -10,7 +10,7 @@ const dump = require('buffer-hexdump');
 const moment = require('moment');
 
 class SerialStream extends EventEmitter {
-    constructor(device, baud, interframeTimeout = 50) {
+    constructor(device, baud, interframeTimeout, filterNoise) {
         super();
 
         this.serial = new SerialPort({
@@ -35,8 +35,13 @@ class SerialStream extends EventEmitter {
             else
                 this.buf = Buffer.concat([this.buf, data]);
             this.timer = setTimeout(() => {
-                this.emit('data', this.buf);
+                const data = this.buf;
                 this.buf = null;
+                if (filterNoise && data.length < 4) {
+                    console.log('dropping noise: ', data.toString('hex'));
+                    return;
+                }
+                this.emit('data', data);
             }, interframeTimeout);
         });
     }
@@ -118,7 +123,7 @@ const writeTrafficLog = (senderName, data, log) => {
 };
 
 const createSerialStream = options => {
-    const stream = new SerialStream(options.device, options.baud, options.interFrameTimeout);
+    const stream = new SerialStream(options.device, options.baud, options.interFrameTimeout, options.filterNoise);
     stream.on('data', data => {
         const leftName = options.device;
         const rightName = (stream.peer && ! options.noForward)
@@ -209,6 +214,10 @@ const argv = require('yargs/yargs')(process.argv.slice(2))
         type: 'number',
         default: 50,
     })
+    .option('filter-noise', {
+        alias: 'N',
+        describe: 'drop octets on the serial port side caused by noise',
+    })
     .option('log', {
         alias: 'l',
         describe: 'log file',
@@ -221,6 +230,7 @@ const serialStream = createSerialStream({
     device: argv.device,
     baud: argv.baud,
     interFrameTimeout: argv.interFrameTimeout,
+    filterNoise: argv.filterNoise,
     log,
 });
 const socketStream = createSocketStream({
