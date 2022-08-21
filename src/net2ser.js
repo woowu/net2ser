@@ -21,6 +21,7 @@ class SerialStream extends EventEmitter {
         this._name = device;
         this.timer = null;
         this.buf = null;
+        this._filterNoise = filterNoise;
 
         this.serial.open(err => {
             if (err) {
@@ -34,14 +35,12 @@ class SerialStream extends EventEmitter {
                 this.buf = data;
             else
                 this.buf = Buffer.concat([this.buf, data]);
+            if (this.buf.length >= 64) {
+                this._indicateData();
+                return;
+            }
             this.timer = setTimeout(() => {
-                const data = this.buf;
-                this.buf = null;
-                if (filterNoise && data.length < 4) {
-                    console.log('dropping noise: ', data.toString('hex'));
-                    return;
-                }
-                this.emit('data', data);
+                this._indicateData();
             }, interframeTimeout);
         });
     }
@@ -56,6 +55,16 @@ class SerialStream extends EventEmitter {
 
     name() {
         return this._name;
+    }
+
+    _indicateData() {
+        const data = this.buf;
+        this.buf = null;
+        if (this._filterNoise && data.length < 2) { /* note: this is dangouse! */
+            console.log('dropping noise: ', data.toString('hex'));
+            return;
+        }
+        this.emit('data', data);
     }
 }
 
