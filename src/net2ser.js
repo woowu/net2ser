@@ -35,7 +35,7 @@ class SerialStream extends EventEmitter {
                 this.buf = data;
             else
                 this.buf = Buffer.concat([this.buf, data]);
-            if (this.buf.length >= 64) {
+            if (this.buf.length >= 256) {
                 this._indicateData();
                 return;
             }
@@ -131,6 +131,13 @@ const writeTrafficLog = (senderName, data, log) => {
     log(logLine);
 };
 
+const printData = (data, brief) => {
+    const briefLen = 64;
+    console.log(dump(brief ? data.slice(0, briefLen) : data));
+    if (brief && data.length > briefLen)
+        console.log(' ...');
+};
+
 const createSerialStream = options => {
     const stream = new SerialStream(options.device, options.baud, options.interFrameTimeout, options.filterNoise);
     stream.on('data', data => {
@@ -141,7 +148,7 @@ const createSerialStream = options => {
             console.log(`${leftName} -> ${rightName} len ${data.length}`);
         else
             console.log(`${leftName} len ${data.length}`);
-        console.log(dump(data));
+        printData(data, options.brief);
         if (rightName) stream.peer.write(data);
         if (options.log) writeTrafficLog(leftName, data, options.log);
     });
@@ -158,7 +165,7 @@ const createSocketStream = options => {
             console.log(`${leftName} -> ${rightName} len ${data.length}`);
         else
             console.log(`${leftName} len ${data.length}`);
-        console.log(dump(data));
+        printData(data, options.brief);
         if (rightName) stream.peer.write(data);
         if (options.log) writeTrafficLog(leftName, data, options.log);
     });
@@ -227,6 +234,10 @@ const argv = require('yargs/yargs')(process.argv.slice(2))
         alias: 'N',
         describe: 'drop octets on the serial port side caused by noise',
     })
+    .option('brief', {
+        alias: 'B',
+        describe: 'print less to save cpu cycle',
+    })
     .option('log', {
         alias: 'l',
         describe: 'log file',
@@ -240,11 +251,13 @@ const serialStream = createSerialStream({
     baud: argv.baud,
     interFrameTimeout: argv.interFrameTimeout,
     filterNoise: argv.filterNoise,
+    brief: argv.brief,
     log,
 });
 const socketStream = createSocketStream({
     port: argv.port,
     interFrameTimeout: argv.interFrameTimeout,
+    brief: argv.brief,
     log,
 });
 serialStream.peer = socketStream;
