@@ -10,7 +10,7 @@ const dump = require('buffer-hexdump');
 const moment = require('moment');
 
 class SerialStream extends EventEmitter {
-    constructor(device, baud, interframeTimeout, filterNoise) {
+    constructor(device, baud, interframeTimeout, maxFrameLen, filterNoise) {
         super();
 
         this.serial = new SerialPort({
@@ -35,7 +35,7 @@ class SerialStream extends EventEmitter {
                 this.buf = data;
             else
                 this.buf = Buffer.concat([this.buf, data]);
-            if (this.buf.length >= 256) {
+            if (this.buf.length >= maxFrameLen) {
                 this._indicateData();
                 return;
             }
@@ -69,12 +69,14 @@ class SerialStream extends EventEmitter {
 }
 
 class SocketStream extends EventEmitter {
-    constructor(port, interframeTimeout = 50) {
+    constructor(port, interframeTimeout, blockTransfer) {
         super();
 
         this.timer = null;
         this.buf = null;
         this.socket = null;
+        this.blockTransfer = blockTransfer;
+        this.blockSeqno = 0;
 
         this.server = net.createServer(c => {
             c.on('data', data => {
@@ -89,10 +91,12 @@ class SocketStream extends EventEmitter {
                 }, interframeTimeout);
             });
             c.on('end', () => {
+                console.log('client disconnected');
                 if (c == this.socket) this.socket = null;
             });
             c.on('error', err => {
                 console.error('error:', err.message);
+                this.socket = null;
             });
 
             console.log('new connection from', `${c.remoteAddress}:${c.remotePort}`);
@@ -111,7 +115,22 @@ class SocketStream extends EventEmitter {
     }
 
     write(data) {
-        if (this.socket) this.socket.write(data);
+        const BLOCK_HEAD = 0x3e;
+        if (! this.socket) return;
+        if (! this.blockTransfer) this._writeSocket(data);
+
+        const t = new Date().getTime();
+        const ab = new ArrayBuffer(1 + 4 + 8 + 4);
+        new DataView(ab).setUint8(0, BLOCK_HEAD);
+        new DataView(ab).setUint32(1, this.blockSeqno);
+        new DataView(ab).setBigInt64(1 + 4, BigInt(t));
+        new DataView(ab).setUint32(1 + 4 + 8, data.length);
+        const block = Buffer.concat([Buffer.from(ab), data]);
+        console.log('send block', block.slice(0, 20), '...');
+        this._writeSocket(block);
+
+        if (++this.blockSeqno == 0xffffffff)
+            this.blockSeqno = 0;
     }
 
     end() {
@@ -122,6 +141,15 @@ class SocketStream extends EventEmitter {
         if (! this.socket) return null;
         return `${this.socket.remoteAddress}:${this.socket.remotePort}`;
     }
+
+    _writeSocket(data) {
+        try {
+            this.socket.write(data);
+        }
+        catch (e) {
+            console.error(e.message);
+        }
+    }
 }
 
 const writeTrafficLog = (senderName, data, log) => {
@@ -131,24 +159,24 @@ const writeTrafficLog = (senderName, data, log) => {
     log(logLine);
 };
 
-const printData = (data, brief) => {
-    const briefLen = 64;
-    console.log(dump(brief ? data.slice(0, briefLen) : data));
-    if (brief && data.length > briefLen)
-        console.log(' ...');
+const printData = data => {
+    console.log(dump(data));
 };
 
 const createSerialStream = options => {
-    const stream = new SerialStream(options.device, options.baud, options.interFrameTimeout, options.filterNoise);
+    const stream = new SerialStream(
+        options.device, options.baud,
+        options.interFrameTimeout, options.maxFrameLen, 
+        options.filterNoise);
     stream.on('data', data => {
         const leftName = options.device;
         const rightName = (stream.peer && ! options.noForward)
             ? stream.peer.name() : null;
-        if (! options.noForward)
+        if (! options.silence && ! options.noForward)
             console.log(`${leftName} -> ${rightName} len ${data.length}`);
-        else
+        else if (! options.silence)
             console.log(`${leftName} len ${data.length}`);
-        printData(data, options.brief);
+        if (! options.silence) printData(data);
         if (rightName) stream.peer.write(data);
         if (options.log) writeTrafficLog(leftName, data, options.log);
     });
@@ -156,16 +184,17 @@ const createSerialStream = options => {
 };
 
 const createSocketStream = options => {
-    const stream = new SocketStream(options.port, options.interFrameTimeout);
+    const stream = new SocketStream(options.port,
+        options.interFrameTimeout, options.blockTransfer);
     stream.on('data', (data, socket) => {
         const leftName = `${socket.remoteAddress}:${socket.remotePort}`;
         const rightName = (stream.peer && ! options.noForward)
             ? stream.peer.name() : null;
-        if (! options.noForward)
+        if (! options.silence && ! options.noForward)
             console.log(`${leftName} -> ${rightName} len ${data.length}`);
-        else
+        else if (! options.silence)
             console.log(`${leftName} len ${data.length}`);
-        printData(data, options.brief);
+        if (! options.silence) printData(data);
         if (rightName) stream.peer.write(data);
         if (options.log) writeTrafficLog(leftName, data, options.log);
     });
@@ -230,13 +259,23 @@ const argv = require('yargs/yargs')(process.argv.slice(2))
         type: 'number',
         default: 50,
     })
+    .option('max-frame-len', {
+        alias: 's',
+        describe: 'max frame length when receiving from serial port',
+        nargs: 1,
+        type: 'number',
+        default: 128,
+    })
     .option('filter-noise', {
         alias: 'N',
         describe: 'drop octets on the serial port side caused by noise',
     })
-    .option('brief', {
-        alias: 'B',
-        describe: 'print less to save cpu cycle',
+    .option('silence', {
+        alias: 'S',
+        describe: 'silence',
+    })
+    .option('block-transfer', {
+        describe: 'send to tcp in blocks',
     })
     .option('log', {
         alias: 'l',
@@ -250,14 +289,16 @@ const serialStream = createSerialStream({
     device: argv.device,
     baud: argv.baud,
     interFrameTimeout: argv.interFrameTimeout,
+    maxFrameLen: argv.maxFrameLen,
     filterNoise: argv.filterNoise,
-    brief: argv.brief,
+    silence: argv.silence,
     log,
 });
 const socketStream = createSocketStream({
     port: argv.port,
     interFrameTimeout: argv.interFrameTimeout,
-    brief: argv.brief,
+    silence: argv.silence,
+    blockTransfer: argv.blockTransfer,
     log,
 });
 serialStream.peer = socketStream;
